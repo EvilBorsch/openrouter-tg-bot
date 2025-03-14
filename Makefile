@@ -51,8 +51,6 @@ logs-follow:
 status:
 	docker ps -a | grep $(CONTAINER_NAME)
 
-# Rebuild and restart the container
-rebuild: remove build run
 
 # Clean everything (remove container and image)
 clean: remove
@@ -60,6 +58,6 @@ clean: remove
 	@echo "To remove data directory run: rm -rf $(DATA_DIR)"
 
 # Build and run (all-in-one command)
-deploy: build run
+deploy: remove build run
 
 .PHONY: setup build run stop start restart remove logs logs-follow status rebuild clean deploy
