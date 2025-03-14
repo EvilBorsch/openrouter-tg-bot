@@ -27,8 +27,6 @@ WORKDIR /main
 # Add ca-certificates for HTTPS
 RUN apk --no-cache add ca-certificates tzdata
 
-COPY ./data/bot_config.json ./data/bot_config.json
-
 # Create volume for persistent data
 VOLUME ./data
 
