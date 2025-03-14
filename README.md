@@ -72,8 +72,8 @@ The bot will automatically restart if it crashes or if the server reboots.
 
 ### Troubleshooting
 1) Bot doesn't start: Check that TELEGRAM_TOKEN and BOT_PASSWORD are set correctly
-2) Bot doesn't respond: Check the logs for errors
-3) Formatting issues: The bot tries to handle various formatting, but some complex markdown might not render correctly
+2) Bot doesn't respond: Check the logs for errors (`make logs`)
+3) Formatting issues: The bot tries to handle various formatting, but some complex markdown might not render correctly (`make logs`)
 
 
 ### For my comrads

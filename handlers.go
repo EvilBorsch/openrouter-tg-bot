@@ -12,6 +12,40 @@ import (
 
 var bot *tgbotapi.BotAPI
 
+// Escape text for use with Telegram MarkdownV2 parse mode
+func escapeMarkdownV2(text string) string {
+	// Based on official Telegram recommendations for MarkdownV2
+	replacements := []struct {
+		old string
+		new string
+	}{
+		{"\\", "\\\\"},
+		{"_", "\\_"},
+		{"*", "\\*"},
+		{"[", "\\["},
+		{"]", "\\]"},
+		{"(", "\\("},
+		{")", "\\)"},
+		{"~", "\\~"},
+		{"`", "\\`"},
+		{">", "\\>"},
+		{"#", "\\#"},
+		{"+", "\\+"},
+		{"-", "\\-"},
+		{"=", "\\="},
+		{"|", "\\|"},
+		{"{", "\\{"},
+		{"}", "\\}"},
+		{".", "\\."},
+		{"!", "\\!"},
+	}
+
+	for _, r := range replacements {
+		text = strings.ReplaceAll(text, r.old, r.new)
+	}
+	return text
+}
+
 // Check if user is authorized, or handle authorization
 func isAuthorized(userID int64, message *tgbotapi.Message, requestID string) bool {
 	configMu.Lock()
@@ -259,12 +293,14 @@ func cleanModelPrefix(text string) string {
 	return trimmedText
 }
 
-// Send a message in Markdown format (including splitting long messages if needed)
+// Send a message in Markdown (with Telegram MarkdownV2 parsing, including escaping)
 func sendMarkdownMessage(chatID int64, text string, requestID string) {
 	logDebug("[%s] Sending Markdown message to chat %d, length: %d chars", requestID, chatID, len(text))
 
 	// Ensure text is UTF-8
 	text = ensureUTF8(text)
+	// Escape for MarkdownV2
+	text = escapeMarkdownV2(text)
 
 	// Split if too long
 	if len(text) > 4000 {
@@ -274,7 +310,7 @@ func sendMarkdownMessage(chatID int64, text string, requestID string) {
 	}
 
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
+	msg.ParseMode = "MarkdownV2"
 
 	var err error
 	maxRetries := 3
@@ -308,7 +344,7 @@ func sendMarkdownMessage(chatID int64, text string, requestID string) {
 	bot.Send(fallbackMsg)
 }
 
-// Split and send a large Markdown message in multiple parts
+// Split a large message into multiple parts, each processed with MarkdownV2
 func sendMultipartMarkdownMessage(chatID int64, text string, requestID string) {
 	const maxPartSize = 4000
 
@@ -363,8 +399,9 @@ func sendMultipartMarkdownMessage(chatID int64, text string, requestID string) {
 
 	totalParts := len(parts)
 	for i, part := range parts {
+		part = escapeMarkdownV2(part)
 		msg := tgbotapi.NewMessage(chatID, part)
-		msg.ParseMode = "Markdown"
+		msg.ParseMode = "MarkdownV2"
 
 		maxRetries := 3
 		success := false
@@ -378,16 +415,14 @@ func sendMultipartMarkdownMessage(chatID int64, text string, requestID string) {
 			logError("[%s] Failed to send Markdown part %d/%d (attempt %d/%d): %v",
 				requestID, i+1, totalParts, j+1, maxRetries, err)
 
-			if j == maxRetries-1 && (strings.Contains(err.Error(), "can't parse entities") ||
-				strings.Contains(err.Error(), "Bad Request")) {
+			if strings.Contains(err.Error(), "can't parse entities") ||
+				strings.Contains(err.Error(), "Bad Request") {
 				msg.ParseMode = ""
-				_, err = bot.Send(msg)
+				_, err := bot.Send(msg)
 				if err == nil {
 					logDebug("[%s] Part %d/%d sent as plain text", requestID, i+1, totalParts)
 					success = true
-				} else {
-					logError("[%s] Failed to send part %d/%d as plain text: %v",
-						requestID, i+1, totalParts, err)
+					break
 				}
 			}
 
