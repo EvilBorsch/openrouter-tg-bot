@@ -32,7 +32,7 @@ WORKDIR /app
 COPY --from=builder /app/telegram-bot .
 
 # Create volume for persistent data
-VOLUME /app/data
+VOLUME /app
 
 # Run the bot
 CMD ["./telegram-bot"]
