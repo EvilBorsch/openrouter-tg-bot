@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -276,7 +275,7 @@ func queryOpenRouterWithContext(ctx context.Context, user User, query string, re
 	return responseContent, nil
 }
 
-// Sanitize response to ensure proper encoding and formatting
+// Sanitize response to ensure proper encoding and formatting for Telegram Markdown
 func sanitizeResponse(text string, requestID string) string {
 	// Ensure text is UTF-8 compliant
 	if !utf8.ValidString(text) {
@@ -288,10 +287,6 @@ func sanitizeResponse(text string, requestID string) string {
 			return r
 		}, text)
 	}
-
-	// Fix common escaping issues with Markdown syntax
-	// This helps with bold text, links, etc.
-	text = regexp.MustCompile(`\\(\*|_|\[|\]|\(|\)|~|\|>|#|\+|-|=|\||\{|\}|\.|!)`).ReplaceAllString(text, "$1")
 
 	// Clean up any strange character combinations
 	text = strings.ReplaceAll(text, "\r\n", "\n")

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"html"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -11,40 +13,6 @@ import (
 )
 
 var bot *tgbotapi.BotAPI
-
-// Escape text for use with Telegram MarkdownV2 parse mode
-func escapeMarkdownV2(text string) string {
-	// Based on official Telegram recommendations for MarkdownV2
-	replacements := []struct {
-		old string
-		new string
-	}{
-		{"\\", "\\\\"},
-		{"_", "\\_"},
-		{"*", "\\*"},
-		{"[", "\\["},
-		{"]", "\\]"},
-		{"(", "\\("},
-		{")", "\\)"},
-		{"~", "\\~"},
-		{"`", "\\`"},
-		{">", "\\>"},
-		{"#", "\\#"},
-		{"+", "\\+"},
-		{"-", "\\-"},
-		{"=", "\\="},
-		{"|", "\\|"},
-		{"{", "\\{"},
-		{"}", "\\}"},
-		{".", "\\."},
-		{"!", "\\!"},
-	}
-
-	for _, r := range replacements {
-		text = strings.ReplaceAll(text, r.old, r.new)
-	}
-	return text
-}
 
 // Check if user is authorized, or handle authorization
 func isAuthorized(userID int64, message *tgbotapi.Message, requestID string) bool {
@@ -293,41 +261,44 @@ func cleanModelPrefix(text string) string {
 	return trimmedText
 }
 
-// Send a message in Markdown (with Telegram MarkdownV2 parsing, including escaping)
+// Send a message in Markdown format (including splitting long messages if needed)
 func sendMarkdownMessage(chatID int64, text string, requestID string) {
 	logDebug("[%s] Sending Markdown message to chat %d, length: %d chars", requestID, chatID, len(text))
 
 	// Ensure text is UTF-8
 	text = ensureUTF8(text)
-	// Escape for MarkdownV2
-	text = escapeMarkdownV2(text)
+
+	// Process the text for Telegram's Markdown
+	processedText := convertToTelegramHTML(text)
 
 	// Split if too long
-	if len(text) > 4000 {
-		logInfo("[%s] Message too long (%d chars), splitting into multiple parts", requestID, len(text))
-		sendMultipartMarkdownMessage(chatID, text, requestID)
+	if len(processedText) > 4000 {
+		logInfo("[%s] Message too long (%d chars), splitting into multiple parts", requestID, len(processedText))
+		sendMultipartHTMLMessage(chatID, processedText, requestID)
 		return
 	}
 
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "MarkdownV2"
+	msg := tgbotapi.NewMessage(chatID, processedText)
+	msg.ParseMode = "HTML" // Switch to HTML for more reliable parsing
 
 	var err error
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
 		_, err = bot.Send(msg)
 		if err == nil {
-			logDebug("[%s] Markdown message sent successfully", requestID)
+			logDebug("[%s] HTML message sent successfully", requestID)
 			return
 		}
-		logError("[%s] Failed to send Markdown message (attempt %d/%d): %v", requestID, i+1, maxRetries, err)
+		logError("[%s] Failed to send HTML message (attempt %d/%d): %v", requestID, i+1, maxRetries, err)
 
-		// If parse fails or there's a bad request, try sending as plain text
+		// If HTML parse fails too, try sending as plain text
 		if strings.Contains(err.Error(), "can't parse entities") ||
 			strings.Contains(err.Error(), "Bad Request") {
-			logInfo("[%s] Markdown parse failed, sending as plain text", requestID)
-			msg.ParseMode = ""
-			_, err = bot.Send(msg)
+			logInfo("[%s] HTML parse failed, sending as plain text", requestID)
+			// Strip HTML tags and send as plain text
+			plainText := stripHTMLTags(processedText)
+			plainMsg := tgbotapi.NewMessage(chatID, plainText)
+			_, err = bot.Send(plainMsg)
 			if err == nil {
 				logDebug("[%s] Plain text message sent successfully", requestID)
 				return
@@ -339,58 +310,24 @@ func sendMarkdownMessage(chatID int64, text string, requestID string) {
 		}
 	}
 
-	logError("[%s] Failed to send Markdown message after %d attempts", requestID, maxRetries)
+	logError("[%s] Failed to send message after %d attempts", requestID, maxRetries)
 	fallbackMsg := tgbotapi.NewMessage(chatID, "I received a response but couldn't display it properly. Please try again.")
 	bot.Send(fallbackMsg)
 }
 
-// Split a large message into multiple parts, each processed with MarkdownV2
-func sendMultipartMarkdownMessage(chatID int64, text string, requestID string) {
+// Split and send a large HTML message in multiple parts
+func sendMultipartHTMLMessage(chatID int64, text string, requestID string) {
 	const maxPartSize = 4000
 
 	var parts []string
 	remaining := text
 
 	for len(remaining) > maxPartSize {
-		splitIndex := maxPartSize
-		// Try paragraph break
-		for i := maxPartSize; i > maxPartSize/2; i-- {
-			if i < len(remaining) && (remaining[i] == '\n' && i > 0 && remaining[i-1] == '\n') {
-				splitIndex = i
-				break
-			}
-		}
-		// Try single line break
-		if splitIndex == maxPartSize {
-			for i := maxPartSize; i > maxPartSize/2; i-- {
-				if i < len(remaining) && remaining[i] == '\n' {
-					splitIndex = i
-					break
-				}
-			}
-		}
-		// Try sentence break
-		if splitIndex == maxPartSize {
-			for i := maxPartSize; i > maxPartSize/2; i-- {
-				if i < len(remaining) && (remaining[i] == '.' || remaining[i] == '?' || remaining[i] == '!') {
-					splitIndex = i + 1
-					if i+1 < len(remaining) && remaining[i+1] == ' ' {
-						splitIndex++
-					}
-					break
-				}
-			}
-		}
-		// Try word boundary
-		if splitIndex == maxPartSize {
-			for i := maxPartSize; i > maxPartSize/2; i-- {
-				if i < len(remaining) && remaining[i] == ' ' {
-					splitIndex = i
-					break
-				}
-			}
-		}
-		parts = append(parts, remaining[:splitIndex])
+		splitIndex := findSplitPoint(remaining, maxPartSize)
+		// Ensure HTML tags are properly closed
+		part := remaining[:splitIndex]
+		part = ensureHTMLTagsClosed(part)
+		parts = append(parts, part)
 		remaining = remaining[splitIndex:]
 	}
 	if len(remaining) > 0 {
@@ -399,30 +336,38 @@ func sendMultipartMarkdownMessage(chatID int64, text string, requestID string) {
 
 	totalParts := len(parts)
 	for i, part := range parts {
-		part = escapeMarkdownV2(part)
-		msg := tgbotapi.NewMessage(chatID, part)
-		msg.ParseMode = "MarkdownV2"
+		header := ""
+		if totalParts > 1 {
+			header = fmt.Sprintf("<b>Part %d/%d:</b>\n\n", i+1, totalParts)
+		}
+
+		msg := tgbotapi.NewMessage(chatID, header+part)
+		msg.ParseMode = "HTML"
 
 		maxRetries := 3
 		success := false
+
 		for j := 0; j < maxRetries; j++ {
 			_, err := bot.Send(msg)
 			if err == nil {
-				logDebug("[%s] Multipart section %d/%d sent successfully", requestID, i+1, totalParts)
+				logDebug("[%s] Part %d/%d sent successfully", requestID, i+1, totalParts)
 				success = true
 				break
 			}
-			logError("[%s] Failed to send Markdown part %d/%d (attempt %d/%d): %v",
+			logError("[%s] Failed to send HTML part %d/%d (attempt %d/%d): %v",
 				requestID, i+1, totalParts, j+1, maxRetries, err)
 
-			if strings.Contains(err.Error(), "can't parse entities") ||
-				strings.Contains(err.Error(), "Bad Request") {
-				msg.ParseMode = ""
-				_, err := bot.Send(msg)
+			// If HTML fails, try plain text
+			if j == maxRetries-1 {
+				plainText := stripHTMLTags(header + part)
+				plainMsg := tgbotapi.NewMessage(chatID, plainText)
+				_, err = bot.Send(plainMsg)
 				if err == nil {
 					logDebug("[%s] Part %d/%d sent as plain text", requestID, i+1, totalParts)
 					success = true
-					break
+				} else {
+					logError("[%s] Failed to send part %d/%d as plain text: %v",
+						requestID, i+1, totalParts, err)
 				}
 			}
 
@@ -438,6 +383,94 @@ func sendMultipartMarkdownMessage(chatID int64, text string, requestID string) {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
+}
+
+// Convert Markdown to Telegram HTML
+func convertToTelegramHTML(text string) string {
+	// Replace code blocks
+	codeBlockRegex := regexp.MustCompile("```(?:.*?)\n([\\s\\S]*?)```")
+	text = codeBlockRegex.ReplaceAllStringFunc(text, func(match string) string {
+		// Extract code content
+		content := codeBlockRegex.FindStringSubmatch(match)[1]
+		// Escape HTML special chars in code
+		content = html.EscapeString(content)
+		return "<pre>" + content + "</pre>"
+	})
+
+	// Replace inline code
+	inlineCodeRegex := regexp.MustCompile("`([^`]+)`")
+	text = inlineCodeRegex.ReplaceAllString(text, "<code>$1</code>")
+
+	// Replace bold
+	text = regexp.MustCompile(`\*\*(.*?)\*\*`).ReplaceAllString(text, "<b>$1</b>")
+	text = regexp.MustCompile(`\*(.*?)\*`).ReplaceAllString(text, "<b>$1</b>")
+
+	// Replace italic
+	text = regexp.MustCompile(`_(.*?)_`).ReplaceAllString(text, "<i>$1</i>")
+
+	// Handle links - this is simplified
+	linkRegex := regexp.MustCompile(`\[(.*?)\]\((.*?)\)`)
+	text = linkRegex.ReplaceAllString(text, "<a href=\"$2\">$1</a>")
+
+	// Escape any remaining HTML special chars that aren't part of our formatting
+	text = escapeNonTagHTML(text)
+
+	return text
+}
+
+// Strip HTML tags for plain text fallback
+func stripHTMLTags(text string) string {
+	return regexp.MustCompile("<[^>]*>").ReplaceAllString(text, "")
+}
+
+// Ensure HTML tags are properly closed in a fragment
+func ensureHTMLTagsClosed(htmlFragment string) string {
+	// This is a simplified approach - for production use, consider a proper HTML parser
+	openTags := regexp.MustCompile("<([a-z]+)[^>]*>").FindAllStringSubmatch(htmlFragment, -1)
+	closedTags := regexp.MustCompile("</([a-z]+)>").FindAllStringSubmatch(htmlFragment, -1)
+
+	// Count open and closed tags
+	tagCount := make(map[string]int)
+	for _, tag := range openTags {
+		tagCount[tag[1]]++
+	}
+	for _, tag := range closedTags {
+		tagCount[tag[1]]--
+	}
+
+	// Add closing tags as needed
+	for tag, count := range tagCount {
+		for i := 0; i < count; i++ {
+			htmlFragment += "</" + tag + ">"
+		}
+	}
+
+	return htmlFragment
+}
+
+// Escape HTML special chars except in tags we've already formatted
+func escapeNonTagHTML(text string) string {
+	// Split by HTML tags
+	parts := regexp.MustCompile("(<[^>]*>)").Split(text, -1)
+	tags := regexp.MustCompile("(<[^>]*>)").FindAllString(text, -1)
+
+	// Escape text between tags
+	for i := range parts {
+		if i < len(parts) {
+			parts[i] = html.EscapeString(parts[i])
+		}
+	}
+
+	// Reconstruct the string
+	var result strings.Builder
+	for i := range parts {
+		result.WriteString(parts[i])
+		if i < len(tags) {
+			result.WriteString(tags[i])
+		}
+	}
+
+	return result.String()
 }
 
 // Send a simple text message (no special parse mode)
