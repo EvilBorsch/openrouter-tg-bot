@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"html"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -412,10 +414,199 @@ func convertToTelegramHTML(text string) string {
 	linkRegex := regexp.MustCompile(`\[(.*?)\]\((.*?)\)`)
 	text = linkRegex.ReplaceAllString(text, "<a href=\"$2\">$1</a>")
 
-	// Escape any remaining HTML special chars that aren't part of our formatting
-	text = escapeNonTagHTML(text)
+	// Convert tables to a simple format that works in Telegram
+	text = convertTableToTelegramFormat(text)
+
+	// Properly handle HTML entities
+	text = decodeHTMLEntities(text)
 
 	return text
+}
+
+// Convert markdown tables to a Telegram-friendly format
+func convertTableToTelegramFormat(text string) string {
+	// Find all table blocks (assuming they start with | and contain multiple lines)
+	tableBlockRegex := regexp.MustCompile(`(?m)^\|(.+)\|$[\r\n]+\|([-:| ]+)\|[\r\n]+((?:\|.+\|$[\r\n]?)+)`)
+
+	return tableBlockRegex.ReplaceAllStringFunc(text, func(tableBlock string) string {
+		// Split the table into lines
+		lines := strings.Split(tableBlock, "\n")
+		if len(lines) < 3 {
+			return tableBlock // Not enough lines for a table
+		}
+
+		// Process header row
+		headerRow := strings.Trim(lines[0], "\r\n")
+		headers := extractTableCells(headerRow)
+
+		// Skip the separator line
+
+		// Process data rows
+		var resultTable strings.Builder
+		resultTable.WriteString("<b>Table:</b>\n\n")
+
+		// Add bold headers
+		for i, header := range headers {
+			header = strings.TrimSpace(header)
+			if i > 0 {
+				resultTable.WriteString(" | ")
+			}
+			resultTable.WriteString("<b>")
+			resultTable.WriteString(header)
+			resultTable.WriteString("</b>")
+		}
+		resultTable.WriteString("\n")
+
+		// Add separator
+		resultTable.WriteString(strings.Repeat("-", 30))
+		resultTable.WriteString("\n")
+
+		// Add data rows
+		for i := 2; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == "" {
+				continue
+			}
+
+			cells := extractTableCells(lines[i])
+			for j, cell := range cells {
+				cell = strings.TrimSpace(cell)
+				if j > 0 {
+					resultTable.WriteString(" | ")
+				}
+				resultTable.WriteString(cell)
+			}
+			resultTable.WriteString("\n")
+		}
+
+		return resultTable.String()
+	})
+}
+
+// Extract cells from a table row
+func extractTableCells(row string) []string {
+	// Remove the first and last pipe characters
+	row = strings.Trim(row, "\r\n")
+	if strings.HasPrefix(row, "|") {
+		row = row[1:]
+	}
+	if strings.HasSuffix(row, "|") {
+		row = row[:len(row)-1]
+	}
+
+	// Split by pipe character
+	cells := strings.Split(row, "|")
+
+	// Trim each cell
+	for i, cell := range cells {
+		cells[i] = strings.TrimSpace(cell)
+	}
+
+	return cells
+}
+
+// Decode HTML entities that may appear in the text
+func decodeHTMLEntities(text string) string {
+	// Define common HTML entities and their replacements
+	entities := map[string]string{
+		"&quot;":  "\"",
+		"&#34;":   "\"",
+		"&apos;":  "'",
+		"&#39;":   "'",
+		"&amp;":   "&",
+		"&#38;":   "&",
+		"&lt;":    "<",
+		"&#60;":   "<",
+		"&gt;":    ">",
+		"&#62;":   ">",
+		"&nbsp;":  " ",
+		"&#160;":  " ",
+		"&ndash;": "–",
+		"&#8211;": "–",
+		"&mdash;": "—",
+		"&#8212;": "—",
+	}
+
+	// Replace each entity with its character
+	for entity, char := range entities {
+		text = strings.ReplaceAll(text, entity, char)
+	}
+
+	// Use a more comprehensive approach for numeric entities
+	numericEntityRegex := regexp.MustCompile(`&#(\d+);`)
+	text = numericEntityRegex.ReplaceAllStringFunc(text, func(match string) string {
+		numStr := numericEntityRegex.FindStringSubmatch(match)[1]
+		num, err := strconv.Atoi(numStr)
+		if err != nil {
+			return match
+		}
+		return string(rune(num))
+	})
+
+	return text
+}
+
+// Replace escapeNonTagHTML with a more table-friendly version
+func escapeNonTagHTML(text string) string {
+	// Don't escape content inside these tags
+	protectedTags := []string{"pre", "code", "b", "i", "a"}
+
+	// Find all protected tag blocks
+	var protectedBlocks []struct {
+		start, end int
+		content    string
+	}
+
+	for _, tag := range protectedTags {
+		openTagRegex := regexp.MustCompile(fmt.Sprintf("<%s[^>]*>", tag))
+		closeTagRegex := regexp.MustCompile(fmt.Sprintf("</%s>", tag))
+
+		openMatches := openTagRegex.FindAllStringIndex(text, -1)
+		closeMatches := closeTagRegex.FindAllStringIndex(text, -1)
+
+		if len(openMatches) > 0 && len(openMatches) == len(closeMatches) {
+			for i := 0; i < len(openMatches); i++ {
+				start := openMatches[i][0]
+				end := closeMatches[i][1]
+				if start < end {
+					protectedBlocks = append(protectedBlocks, struct {
+						start, end int
+						content    string
+					}{
+						start:   start,
+						end:     end,
+						content: text[start:end],
+					})
+				}
+			}
+		}
+	}
+
+	// Sort protected blocks by start position
+	sort.Slice(protectedBlocks, func(i, j int) bool {
+		return protectedBlocks[i].start < protectedBlocks[j].start
+	})
+
+	// Build result with escaped text only outside protected blocks
+	var result strings.Builder
+	lastEnd := 0
+
+	for _, block := range protectedBlocks {
+		// Escape text before this block
+		if block.start > lastEnd {
+			result.WriteString(html.EscapeString(text[lastEnd:block.start]))
+		}
+
+		// Add the protected block as-is
+		result.WriteString(block.content)
+		lastEnd = block.end
+	}
+
+	// Escape any remaining text
+	if lastEnd < len(text) {
+		result.WriteString(html.EscapeString(text[lastEnd:]))
+	}
+
+	return result.String()
 }
 
 // Strip HTML tags for plain text fallback
@@ -446,31 +637,6 @@ func ensureHTMLTagsClosed(htmlFragment string) string {
 	}
 
 	return htmlFragment
-}
-
-// Escape HTML special chars except in tags we've already formatted
-func escapeNonTagHTML(text string) string {
-	// Split by HTML tags
-	parts := regexp.MustCompile("(<[^>]*>)").Split(text, -1)
-	tags := regexp.MustCompile("(<[^>]*>)").FindAllString(text, -1)
-
-	// Escape text between tags
-	for i := range parts {
-		if i < len(parts) {
-			parts[i] = html.EscapeString(parts[i])
-		}
-	}
-
-	// Reconstruct the string
-	var result strings.Builder
-	for i := range parts {
-		result.WriteString(parts[i])
-		if i < len(tags) {
-			result.WriteString(tags[i])
-		}
-	}
-
-	return result.String()
 }
 
 // Send a simple text message (no special parse mode)
