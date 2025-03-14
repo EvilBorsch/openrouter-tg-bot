@@ -52,7 +52,7 @@ var defaultModels = map[string]string{
 }
 
 const (
-	configFile = "bot_config.json"
+	configFile = "data/bot_config.json"
 	helpText   = `Available commands:
 /help - Show this help message
 /settoken <token> - Set your OpenRouter API token

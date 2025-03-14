@@ -22,30 +22,12 @@ Most code written with help of claude 3.7, so dont really look on overall qualit
 ### Option 1: Docker Installation (Recommended)
 
 ````
-TELEGRAM_TOKEN=<your_token_from_botfather> BOT_PASSWORD=<password that you and your friend write to access bot> docker-compose up --build -d
+   make deploy BOT_PASSWORD=<password that you and your friend can know>
 ````
 
 The bot will automatically restart if it crashes or if the server reboots.
 
-Logs: 
-````
-docker-compose logs -f
-````
-Restart the bot: 
-````
-docker-compose restart
-````
-Update after code changes:
-````
-docker-compose down
-docker-compose up -d
-````
 
-Stop the bot: 
-
-````
-docker-compose down
-````
 
 ### Option 2: Standard Go Installation
 
