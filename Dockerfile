@@ -22,6 +22,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o telegram-bot .
 # Runtime stage
 FROM alpine:latest
 
+# Create volume for persistent data
+VOLUME /app
+
 # Add ca-certificates for HTTPS
 RUN apk --no-cache add ca-certificates tzdata
 
@@ -31,8 +34,6 @@ WORKDIR /app
 # Copy binary from builder stage
 COPY --from=builder /app/telegram-bot .
 
-# Create volume for persistent data
-VOLUME /app
 
 # Run the bot
 CMD ["./telegram-bot"]

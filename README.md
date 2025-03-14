@@ -22,7 +22,7 @@ Most code written with help of claude 3.7, so dont really look on overall qualit
 ### Option 1: Docker Installation (Recommended)
 
 ````
-TELEGRAM_TOKEN=<your_token_from_botfather> BOT_PASSWORD=<password that you and your friend write to access bot> docker-compose up -d
+TELEGRAM_TOKEN=<your_token_from_botfather> BOT_PASSWORD=<password that you and your friend write to access bot> docker-compose up --build -d
 ````
 
 The bot will automatically restart if it crashes or if the server reboots.
