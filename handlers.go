@@ -294,89 +294,41 @@ func cleanModelPrefix(text string) string {
 	return trimmedText
 }
 
+// Send a message with HTML formatting to handle bold, italic, and links
 func sendHTMLMessage(chatID int64, text string, requestID string) {
 	logDebug("[%s] Sending HTML message to chat %d, length: %d chars", requestID, chatID, len(text))
 
 	// Ensure text is UTF-8 compliant
 	text = ensureUTF8(text)
 
-	// Replace markdown-style links with HTML links
-	text = convertMarkdownToHTML(text)
-
-	// Split messages exceeding Telegram's limit
+	// Handle long messages by splitting them into multiple parts
 	if len(text) > 4000 {
 		logInfo("[%s] Message too long (%d chars), splitting into multiple messages", requestID, len(text))
-
-		// Split the message and send each part
-		messageParts := splitLongMessage(text, 4000, true)
-		for i, part := range messageParts {
-			logDebug("[%s] Sending part %d/%d, length: %d chars", requestID, i+1, len(messageParts), len(part))
-
-			msg := tgbotapi.NewMessage(chatID, part)
-			msg.ParseMode = "HTML" // Use HTML mode which supports proper formatting
-
-			sendMessageWithRetry(msg, requestID, i+1, len(messageParts))
-		}
+		sendMultipartHTMLMessage(chatID, text, requestID)
 		return
 	}
 
-	// For messages within the limit, send normally
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "HTML" // Use HTML mode which supports proper formatting
 
-	sendMessageWithRetry(msg, requestID, 1, 1)
-}
-
-// Send a regular message
-func sendMessage(chatID int64, text string, requestID string) {
-	logDebug("[%s] Sending message to chat %d, length: %d chars", requestID, chatID, len(text))
-
-	// Ensure text is UTF-8 compliant
-	text = ensureUTF8(text)
-
-	// Split messages exceeding Telegram's limit
-	if len(text) > 4000 {
-		logInfo("[%s] Message too long (%d chars), splitting into multiple messages", requestID, len(text))
-
-		// Split the message and send each part
-		messageParts := splitLongMessage(text, 4000, false)
-		for i, part := range messageParts {
-			logDebug("[%s] Sending part %d/%d, length: %d chars", requestID, i+1, len(messageParts), len(part))
-
-			msg := tgbotapi.NewMessage(chatID, part)
-			sendMessageWithRetry(msg, requestID, i+1, len(messageParts))
-		}
-		return
-	}
-
-	// For messages within the limit, send normally
-	msg := tgbotapi.NewMessage(chatID, text)
-	sendMessageWithRetry(msg, requestID, 1, 1)
-}
-
-// Helper function to send a message with retry logic
-func sendMessageWithRetry(msg tgbotapi.MessageConfig, requestID string, partNum, totalParts int) {
-	// Add part number indicator for multi-part messages
-	if totalParts > 1 {
-		partIndicator := fmt.Sprintf("[%d/%d] ", partNum, totalParts)
-		msg.Text = partIndicator + msg.Text
-	}
+	// Replace markdown-style links with HTML links
+	msg.Text = convertMarkdownToHTML(msg.Text)
 
 	// Add retry logic for sending messages
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
 		_, err := bot.Send(msg)
 		if err == nil {
-			logDebug("[%s] Message part %d/%d sent successfully", requestID, partNum, totalParts)
+			logDebug("[%s] HTML message sent successfully", requestID)
 			return
 		}
 
-		logError("[%s] Failed to send message part %d/%d (attempt %d/%d): %v",
-			requestID, partNum, totalParts, i+1, maxRetries, err)
+		logError("[%s] Failed to send HTML message (attempt %d/%d): %v",
+			requestID, i+1, maxRetries, err)
 
 		// If HTML parsing fails, try sending as plain text
-		if msg.ParseMode == "HTML" && (strings.Contains(err.Error(), "can't parse entities") ||
-			strings.Contains(err.Error(), "Bad Request")) {
+		if strings.Contains(err.Error(), "can't parse entities") ||
+			strings.Contains(err.Error(), "Bad Request") {
 			logInfo("[%s] HTML parsing failed, sending as plain text", requestID)
 			msg.ParseMode = ""
 			_, err = bot.Send(msg)
@@ -392,117 +344,278 @@ func sendMessageWithRetry(msg tgbotapi.MessageConfig, requestID string, partNum,
 		}
 	}
 
-	logError("[%s] Failed to send message part %d/%d after %d attempts", requestID, partNum, totalParts, maxRetries)
+	// If all retries fail, try to send a very simple message
+	logError("[%s] Failed to send message after %d attempts, sending fallback message", requestID, maxRetries)
+	fallbackMsg := tgbotapi.NewMessage(chatID, "I received a response but couldn't display it properly. Please try again.")
+	bot.Send(fallbackMsg)
 }
 
-// Split a long message into multiple parts with proper formatting
-func splitLongMessage(text string, maxLength int, preserveHTML bool) []string {
-	if len(text) <= maxLength {
-		return []string{text}
-	}
+// Send a long HTML message by splitting it into multiple parts
+func sendMultipartHTMLMessage(chatID int64, text string, requestID string) {
+	const maxPartSize = 4000
 
+	// First, try to split on paragraph boundaries
 	var parts []string
-	remainingText := text
+	remaining := text
 
-	for len(remainingText) > 0 {
-		if len(remainingText) <= maxLength {
-			// Add the remaining text as the last part
-			parts = append(parts, remainingText)
-			break
+	for len(remaining) > maxPartSize {
+		// Look for a good splitting point (paragraph break)
+		splitIndex := maxPartSize
+
+		// Try to find a paragraph break to split at
+		for i := maxPartSize; i > maxPartSize/2; i-- {
+			if i < len(remaining) && (remaining[i] == '\n' && i > 0 && remaining[i-1] == '\n') {
+				splitIndex = i
+				break
+			}
 		}
 
-		// Find a good split point to avoid breaking words/formatting
-		splitPoint := findSplitPoint(remainingText, maxLength, preserveHTML)
+		// If no good paragraph break, try to find a line break
+		if splitIndex == maxPartSize {
+			for i := maxPartSize; i > maxPartSize/2; i-- {
+				if i < len(remaining) && remaining[i] == '\n' {
+					splitIndex = i
+					break
+				}
+			}
+		}
 
-		// Extract the current part
-		currentPart := remainingText[:splitPoint]
-		parts = append(parts, currentPart)
+		// If no line break, try a sentence break
+		if splitIndex == maxPartSize {
+			for i := maxPartSize; i > maxPartSize/2; i-- {
+				if i < len(remaining) && (remaining[i] == '.' || remaining[i] == '?' || remaining[i] == '!') {
+					splitIndex = i + 1 // Include the punctuation
+					if i+1 < len(remaining) && remaining[i+1] == ' ' {
+						splitIndex++ // Include the space after punctuation
+					}
+					break
+				}
+			}
+		}
 
-		// Update the remaining text
-		remainingText = remainingText[splitPoint:]
+		// If no sentence break, just use a word boundary
+		if splitIndex == maxPartSize {
+			for i := maxPartSize; i > maxPartSize/2; i-- {
+				if i < len(remaining) && remaining[i] == ' ' {
+					splitIndex = i
+					break
+				}
+			}
+		}
 
-		// Check for HTML tag consistency if needed
-		if preserveHTML {
-			remainingText = ensureHTMLConsistency(currentPart, remainingText)
+		// Worst case: just split at the max size
+		if splitIndex == maxPartSize {
+			splitIndex = maxPartSize
+		}
+
+		// Add this part
+		parts = append(parts, remaining[:splitIndex])
+
+		// Update remaining text
+		remaining = remaining[splitIndex:]
+	}
+
+	// Add the final part
+	if len(remaining) > 0 {
+		parts = append(parts, remaining)
+	}
+
+	// Send each part with a part indicator
+	totalParts := len(parts)
+	for i, part := range parts {
+		// Add part indicator
+		header := ""
+		if totalParts > 1 {
+			header = fmt.Sprintf("Part %d/%d:\n\n", i+1, totalParts)
+		}
+
+		// Send this part
+		msg := tgbotapi.NewMessage(chatID, header+part)
+		msg.ParseMode = "HTML"
+		msg.Text = convertMarkdownToHTML(msg.Text)
+
+		// Add retry logic for each part
+		maxRetries := 3
+		success := false
+
+		for j := 0; j < maxRetries; j++ {
+			_, err := bot.Send(msg)
+			if err == nil {
+				logDebug("[%s] Part %d/%d sent successfully", requestID, i+1, totalParts)
+				success = true
+				break
+			}
+
+			logError("[%s] Failed to send part %d/%d (attempt %d/%d): %v",
+				requestID, i+1, totalParts, j+1, maxRetries, err)
+
+			// If HTML parsing fails, try without HTML
+			if j == maxRetries-1 && (strings.Contains(err.Error(), "can't parse entities") ||
+				strings.Contains(err.Error(), "Bad Request")) {
+				msg.ParseMode = ""
+				_, err = bot.Send(msg)
+				if err == nil {
+					logDebug("[%s] Part %d/%d sent as plain text", requestID, i+1, totalParts)
+					success = true
+				} else {
+					logError("[%s] Failed to send part %d/%d as plain text: %v",
+						requestID, i+1, totalParts, err)
+				}
+			}
+
+			if j < maxRetries-1 {
+				time.Sleep(time.Duration(j+1) * time.Second) // Exponential backoff
+			}
+		}
+
+		if !success {
+			logError("[%s] Failed to send part %d/%d after all attempts", requestID, i+1, totalParts)
+		}
+
+		// Add a small delay between messages to ensure proper ordering
+		if i < totalParts-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+// Send a regular message
+func sendMessage(chatID int64, text string, requestID string) {
+	logDebug("[%s] Sending message to chat %d, length: %d chars", requestID, chatID, len(text))
+
+	// Ensure text is UTF-8 compliant
+	text = ensureUTF8(text)
+
+	// Handle long messages by splitting them into multiple parts
+	if len(text) > 4000 {
+		logInfo("[%s] Message too long (%d chars), splitting into multiple messages", requestID, len(text))
+		sendMultipartMessage(chatID, text, requestID)
+		return
+	}
+
+	msg := tgbotapi.NewMessage(chatID, text)
+
+	// Add retry logic for sending messages
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		_, err := bot.Send(msg)
+		if err == nil {
+			logDebug("[%s] Message sent successfully", requestID)
+			return
+		}
+
+		logError("[%s] Failed to send message (attempt %d/%d): %v",
+			requestID, i+1, maxRetries, err)
+
+		if i < maxRetries-1 {
+			time.Sleep(time.Duration(i+1) * time.Second) // Exponential backoff
 		}
 	}
 
-	return parts
+	logError("[%s] Failed to send message after %d attempts", requestID, maxRetries)
 }
 
-// Find an appropriate point to split the message
-func findSplitPoint(text string, maxLength int, preserveHTML bool) int {
-	// If text is shorter than max, return its length
-	if len(text) <= maxLength {
+// Send a long message by splitting it into multiple parts
+func sendMultipartMessage(chatID int64, text string, requestID string) {
+	const maxPartSize = 4000
+
+	// Split the message into manageable parts
+	var parts []string
+	remaining := text
+
+	for len(remaining) > maxPartSize {
+		// Find a good split point
+		splitIndex := findSplitPoint(remaining, maxPartSize)
+		parts = append(parts, remaining[:splitIndex])
+		remaining = remaining[splitIndex:]
+	}
+
+	// Add the final part
+	if len(remaining) > 0 {
+		parts = append(parts, remaining)
+	}
+
+	// Send each part
+	totalParts := len(parts)
+	for i, part := range parts {
+		// Add part indicator for multi-part messages
+		header := ""
+		if totalParts > 1 {
+			header = fmt.Sprintf("Part %d/%d:\n\n", i+1, totalParts)
+		}
+
+		msg := tgbotapi.NewMessage(chatID, header+part)
+
+		// Try to send with retries
+		maxRetries := 3
+		success := false
+
+		for j := 0; j < maxRetries; j++ {
+			_, err := bot.Send(msg)
+			if err == nil {
+				logDebug("[%s] Part %d/%d sent successfully", requestID, i+1, totalParts)
+				success = true
+				break
+			}
+
+			logError("[%s] Failed to send part %d/%d (attempt %d/%d): %v",
+				requestID, i+1, totalParts, j+1, maxRetries, err)
+
+			if j < maxRetries-1 {
+				time.Sleep(time.Duration(j+1) * time.Second)
+			}
+		}
+
+		if !success {
+			logError("[%s] Failed to send part %d/%d after all attempts", requestID, i+1, totalParts)
+		}
+
+		// Add a small delay between messages to ensure proper ordering
+		if i < totalParts-1 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+// Find a good point to split a message
+func findSplitPoint(text string, maxSize int) int {
+	if len(text) <= maxSize {
 		return len(text)
 	}
 
-	// Try to split at paragraph break first
-	if idx := strings.LastIndex(text[:maxLength], "\n\n"); idx > maxLength/2 {
-		return idx + 2 // Include the paragraph break
-	}
-
-	// Next try to split at line break
-	if idx := strings.LastIndex(text[:maxLength], "\n"); idx > maxLength/2 {
-		return idx + 1 // Include the line break
-	}
-
-	// Try to split at sentence end (period followed by space)
-	if idx := strings.LastIndex(text[:maxLength], ". "); idx > maxLength/3 {
-		return idx + 2 // Include the period and space
-	}
-
-	// Finally, split at word boundary
-	if idx := strings.LastIndex(text[:maxLength], " "); idx > 0 {
-		return idx + 1 // Include the space
-	}
-
-	// If all else fails, just split at the maximum length
-	return maxLength
-}
-
-// Ensure HTML tags are properly balanced after splitting
-func ensureHTMLConsistency(previousPart, nextPart string) string {
-	// Check for unclosed tags in the previous part
-	openTags := findUnclosedTags(previousPart)
-
-	// If there are unclosed tags, add them to the beginning of the next part
-	if len(openTags) > 0 {
-		prefix := ""
-		for i := len(openTags) - 1; i >= 0; i-- {
-			prefix += "<" + openTags[i] + ">"
+	// Try to split at paragraph boundaries
+	for i := maxSize; i > maxSize/2; i-- {
+		if text[i] == '\n' && i > 0 && text[i-1] == '\n' {
+			return i + 1 // Start after the double newline
 		}
-		return prefix + nextPart
 	}
 
-	return nextPart
-}
+	// Try to split at line breaks
+	for i := maxSize; i > maxSize/2; i-- {
+		if text[i] == '\n' {
+			return i + 1 // Start after the newline
+		}
+	}
 
-// Find unclosed HTML tags in a string
-func findUnclosedTags(html string) []string {
-	// Simple regex to find HTML tags
-	tagRegex := regexp.MustCompile(`</?([a-z]+)[^>]*>`)
-	matches := tagRegex.FindAllStringSubmatch(html, -1)
-
-	// Stack to track open tags
-	var openTags []string
-
-	for _, match := range matches {
-		tagName := match[1]
-		isClosing := strings.HasPrefix(match[0], "</")
-
-		if isClosing {
-			// Pop the last open tag if it matches
-			if len(openTags) > 0 && openTags[len(openTags)-1] == tagName {
-				openTags = openTags[:len(openTags)-1]
+	// Try to split at sentence ends
+	for i := maxSize; i > maxSize/2; i-- {
+		if i < len(text) && (text[i] == '.' || text[i] == '?' || text[i] == '!') {
+			if i+1 < len(text) && text[i+1] == ' ' {
+				return i + 2 // Include the space after sentence end
 			}
-		} else {
-			// Push the tag onto the stack
-			openTags = append(openTags, tagName)
+			return i + 1 // Just after the sentence end
 		}
 	}
 
-	return openTags
+	// Fall back to word boundaries
+	for i := maxSize; i > maxSize/2; i-- {
+		if text[i] == ' ' {
+			return i + 1 // Start after the space
+		}
+	}
+
+	// Worst case: just split at the maximum size
+	return maxSize
 }
 
 // Convert markdown formatting to HTML formatting
