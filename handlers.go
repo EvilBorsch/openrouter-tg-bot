@@ -423,14 +423,9 @@ func sendMultipartHTMLMessage(chatID int64, text string, requestID string) {
 	// Send each part with a part indicator
 	totalParts := len(parts)
 	for i, part := range parts {
-		// Add part indicator
-		header := ""
-		if totalParts > 1 {
-			header = fmt.Sprintf("Part %d/%d:\n\n", i+1, totalParts)
-		}
 
 		// Send this part
-		msg := tgbotapi.NewMessage(chatID, header+part)
+		msg := tgbotapi.NewMessage(chatID, part)
 		msg.ParseMode = "HTML"
 		msg.Text = convertMarkdownToHTML(msg.Text)
 
